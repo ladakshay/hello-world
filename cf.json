@@ -1,14 +1,24 @@
 {
     "AWSTemplateFormatVersion": "2010-09-09",
-    "Description": "AWS CloudFormation Sample Template LAMP_Single_Instance: Create a LAMP stack using a single EC2 instance and a local MySQL database for storage. This template demonstrates using the AWS CloudFormation bootstrap scripts to install the packages and files necessary to deploy the Apache web server, PHP and MySQL at instance launch time. **WARNING** This template creates an Amazon EC2 instance. You will be billed for the AWS resources used if you create a stack from this template.",
+    "Description": "AWS CloudFormation Sample Template LAMP_Multi_AZ: Create a highly available, scalable LAMP stack with an Amazon RDS database instance for the backend data store. This template demonstrates using the AWS CloudFormation bootstrap scripts to install the packages and files necessary to deploy the Apache web server and PHP at instance launch time. **WARNING** This template creates one or more Amazon EC2 instances, an Application Load Balancer and an Amazon RDS DB instance. You will be billed for the AWS resources used if you create a stack from this template.",
     "Parameters": {
+        "VpcId": {
+            "Type": "AWS::EC2::VPC::Id",
+            "Description": "VpcId of your existing Virtual Private Cloud (VPC)",
+            "ConstraintDescription": "must be the VPC Id of an existing Virtual Private Cloud."
+        },
+        "Subnets": {
+            "Type": "List<AWS::EC2::Subnet::Id>",
+            "Description": "The list of SubnetIds in your Virtual Private Cloud (VPC)",
+            "ConstraintDescription": "must be a list of at least two existing subnets associated with at least two different availability zones. They should be residing in the selected Virtual Private Cloud."
+        },
         "KeyName": {
-            "Description": "Name of an existing EC2 KeyPair to enable SSH access to the instance",
+            "Description": "Name of an existing EC2 KeyPair to enable SSH access to the instances",
             "Type": "AWS::EC2::KeyPair::KeyName",
             "ConstraintDescription": "must be the name of an existing EC2 KeyPair."
         },
         "DBName": {
-            "Default": "MyDatabase",
+            "Default": "myDatabase",
             "Description": "MySQL database name",
             "Type": "String",
             "MinLength": "1",
@@ -29,19 +39,74 @@
             "NoEcho": "true",
             "Description": "Password for MySQL database access",
             "Type": "String",
-            "MinLength": "1",
+            "MinLength": "8",
             "MaxLength": "41",
             "AllowedPattern": "[a-zA-Z0-9]*",
             "ConstraintDescription": "must contain only alphanumeric characters."
         },
-        "DBRootPassword": {
-            "NoEcho": "true",
-            "Description": "Root password for MySQL",
+        "DBAllocatedStorage": {
+            "Default": "5",
+            "Description": "The size of the database (Gb)",
+            "Type": "Number",
+            "MinValue": "5",
+            "MaxValue": "1024",
+            "ConstraintDescription": "must be between 5 and 1024Gb."
+        },
+        "DBInstanceClass": {
+            "Description": "The database instance type",
             "Type": "String",
-            "MinLength": "1",
-            "MaxLength": "41",
-            "AllowedPattern": "[a-zA-Z0-9]*",
-            "ConstraintDescription": "must contain only alphanumeric characters."
+            "Default": "db.t2.small",
+            "AllowedValues": [
+                "db.t1.micro",
+                "db.m1.small",
+                "db.m1.medium",
+                "db.m1.large",
+                "db.m1.xlarge",
+                "db.m2.xlarge",
+                "db.m2.2xlarge",
+                "db.m2.4xlarge",
+                "db.m3.medium",
+                "db.m3.large",
+                "db.m3.xlarge",
+                "db.m3.2xlarge",
+                "db.m4.large",
+                "db.m4.xlarge",
+                "db.m4.2xlarge",
+                "db.m4.4xlarge",
+                "db.m4.10xlarge",
+                "db.r3.large",
+                "db.r3.xlarge",
+                "db.r3.2xlarge",
+                "db.r3.4xlarge",
+                "db.r3.8xlarge",
+                "db.m2.xlarge",
+                "db.m2.2xlarge",
+                "db.m2.4xlarge",
+                "db.cr1.8xlarge",
+                "db.t2.micro",
+                "db.t2.small",
+                "db.t2.medium",
+                "db.t2.large"
+            ],
+            "ConstraintDescription": "must select a valid database instance type."
+        },
+        "MultiAZDatabase": {
+            "Default": "true",
+            "Description": "Create a Multi-AZ MySQL Amazon RDS database instance",
+            "Type": "String",
+            "AllowedValues": [
+                "true",
+                "false"
+            ],
+            "ConstraintDescription": "must be either true or false."
+        },
+        "WebServerCapacity": {
+            "Default": "2",
+            "Description": "The initial nuber of WebServer instances",
+            "Type": "Number",
+            "MinValue": "1",
+            "MaxValue": "5",
+            "ConstraintDescription": "must be between 1 and 5 EC2 instances."
         },
         "InstanceType": {
             "Description": "WebServer EC2 instance type",
@@ -532,22 +597,106 @@
         }
     },
     "Resources": {
-        "WebServerInstance": {
-            "Type": "AWS::EC2::Instance",
-            "Metadata": {
-                "AWS::CloudFormation::Init": {
-                    "configSets": {
-                        "InstallAndRun": [
-                            "Install",
-                            "Configure"
-                        ]
+        "ApplicationLoadBalancer": {
+            "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+            "Properties": {
+                "Subnets": {
+                    "Ref": "Subnets"
+                }
+            }
+        },
+        "ALBListener": {
+            "Type": "AWS::ElasticLoadBalancingV2::Listener",
+            "Properties": {
+                "DefaultActions": [
+                    {
+                        "Type": "forward",
+                        "TargetGroupArn": {
+                            "Ref": "ALBTargetGroup"
+                        }
+                    }
+                ],
+                "LoadBalancerArn": {
+                    "Ref": "ApplicationLoadBalancer"
+                },
+                "Port": "80",
+                "Protocol": "HTTP"
+            }
+        },
+        "ALBTargetGroup": {
+            "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+            "Properties": {
+                "HealthCheckIntervalSeconds": 10,
+                "HealthCheckTimeoutSeconds": 5,
+                "HealthyThresholdCount": 2,
+                "Port": 80,
+                "Protocol": "HTTP",
+                "UnhealthyThresholdCount": 5,
+                "VpcId": {
+                    "Ref": "VpcId"
+                },
+                "TargetGroupAttributes": [
+                    {
+                        "Key": "stickiness.enabled",
+                        "Value": "true"
                     },
-                    "Install": {
+                    {
+                        "Key": "stickiness.type",
+                        "Value": "lb_cookie"
+                    },
+                    {
+                        "Key": "stickiness.lb_cookie.duration_seconds",
+                        "Value": "30"
+                    }
+                ]
+            }
+        },
+        "WebServerGroup": {
+            "Type": "AWS::AutoScaling::AutoScalingGroup",
+            "Properties": {
+                "VPCZoneIdentifier": {
+                    "Ref": "Subnets"
+                },
+                "LaunchConfigurationName": {
+                    "Ref": "LaunchConfig"
+                },
+                "MinSize": "1",
+                "MaxSize": "5",
+                "DesiredCapacity": {
+                    "Ref": "WebServerCapacity"
+                },
+                "TargetGroupARNs": [
+                    {
+                        "Ref": "ALBTargetGroup"
+                    }
+                ]
+            },
+            "CreationPolicy": {
+                "ResourceSignal": {
+                    "Timeout": "PT5M",
+                    "Count": {
+                        "Ref": "WebServerCapacity"
+                    }
+                }
+            },
+            "UpdatePolicy": {
+                "AutoScalingRollingUpdate": {
+                    "MinInstancesInService": "1",
+                    "MaxBatchSize": "1",
+                    "PauseTime": "PT15M",
+                    "WaitOnResourceSignals": "true"
+                }
+            }
+        },
+        "LaunchConfig": {
+            "Type": "AWS::AutoScaling::LaunchConfiguration",
+            "Metadata": {
+                "Comment1": "Configure the bootstrap helpers to install the Apache Web Server and PHP",
+                "Comment2": "The website content is downloaded from the CloudFormationPHPSample.zip file",
+                "AWS::CloudFormation::Init": {
+                    "config": {
                         "packages": {
                             "yum": {
-                                "mysql": [],
-                                "mysql-server": [],
-                                "mysql-libs": [],
                                 "httpd": [],
                                 "php": [],
                                 "php-mysql": []
@@ -568,7 +717,7 @@
                                             "    <h1>Welcome to the AWS CloudFormation PHP Sample</h1>\n",
                                             "    <p/>\n",
                                             "    <?php\n",
-                                            "      // Print out the current data and time\n",
+                                            "      // Print out the current data and tie\n",
                                             "      print \"The Current Date and Time is: <br/>\";\n",
                                             "      print date(\"g:i A l, F j Y.\");\n",
                                             "    ?>\n",
@@ -600,7 +749,14 @@
                                             "      {\n",
                                             "        print \"EC2 instance-id = \" . $instanceid . \"<br />\";\n",
                                             "      }\n",
-                                            "      $Database   = \"localhost\";\n",
+                                            "      $Database   = \"",
+                                            {
+                                                "Fn::GetAtt": [
+                                                    "MySQLDatabase",
+                                                    "Endpoint.Address"
+                                                ]
+                                            },
+                                            "\";\n",
                                             "      $DBUser     = \"",
                                             {
                                                 "Ref": "DBUser"
@@ -630,36 +786,6 @@
                                 "mode": "000600",
                                 "owner": "apache",
                                 "group": "apache"
-                            },
-                            "/tmp/setup.mysql": {
-                                "content": {
-                                    "Fn::Join": [
-                                        "",
-                                        [
-                                            "CREATE DATABASE ",
-                                            {
-                                                "Ref": "DBName"
-                                            },
-                                            ";\n",
-                                            "GRANT ALL ON ",
-                                            {
-                                                "Ref": "DBName"
-                                            },
-                                            ".* TO '",
-                                            {
-                                                "Ref": "DBUser"
-                                            },
-                                            "'@localhost IDENTIFIED BY '",
-                                            {
-                                                "Ref": "DBPassword"
-                                            },
-                                            "';\n"
-                                        ]
-                                    ]
-                                },
-                                "mode": "000400",
-                                "owner": "root",
-                                "group": "root"
                             },
                             "/etc/cfn/cfn-hup.conf": {
                                 "content": {
@@ -691,14 +817,13 @@
                                         [
                                             "[cfn-auto-reloader-hook]\n",
                                             "triggers=post.update\n",
-                                            "path=Resources.WebServerInstance.Metadata.AWS::CloudFormation::Init\n",
+                                            "path=Resources.LaunchConfig.Metadata.AWS::CloudFormation::Init\n",
                                             "action=/opt/aws/bin/cfn-init -v ",
                                             "         --stack ",
                                             {
                                                 "Ref": "AWS::StackName"
                                             },
-                                            "         --resource WebServerInstance ",
-                                            "         --configsets InstallAndRun ",
+                                            "         --resource LaunchConfig ",
                                             "         --region ",
                                             {
                                                 "Ref": "AWS::Region"
@@ -715,10 +840,6 @@
                         },
                         "services": {
                             "sysvinit": {
-                                "mysqld": {
-                                    "enabled": "true",
-                                    "ensureRunning": "true"
-                                },
                                 "httpd": {
                                     "enabled": "true",
                                     "ensureRunning": "true"
@@ -729,70 +850,6 @@
                                     "files": [
                                         "/etc/cfn/cfn-hup.conf",
                                         "/etc/cfn/hooks.d/cfn-auto-reloader.conf"
-                                    ]
-                                }
-                            }
-                        }
-                    },
-                    "Configure": {
-                        "commands": {
-                            "01_set_mysql_root_password": {
-                                "command": {
-                                    "Fn::Join": [
-                                        "",
-                                        [
-                                            "mysqladmin -u root password '",
-                                            {
-                                                "Ref": "DBRootPassword"
-                                            },
-                                            "'"
-                                        ]
-                                    ]
-                                },
-                                "test": {
-                                    "Fn::Join": [
-                                        "",
-                                        [
-                                            "$(mysql ",
-                                            {
-                                                "Ref": "DBName"
-                                            },
-                                            " -u root --password='",
-                                            {
-                                                "Ref": "DBRootPassword"
-                                            },
-                                            "' >/dev/null 2>&1 </dev/null); (( $? != 0 ))"
-                                        ]
-                                    ]
-                                }
-                            },
-                            "02_create_database": {
-                                "command": {
-                                    "Fn::Join": [
-                                        "",
-                                        [
-                                            "mysql -u root --password='",
-                                            {
-                                                "Ref": "DBRootPassword"
-                                            },
-                                            "' < /tmp/setup.mysql"
-                                        ]
-                                    ]
-                                },
-                                "test": {
-                                    "Fn::Join": [
-                                        "",
-                                        [
-                                            "$(mysql ",
-                                            {
-                                                "Ref": "DBName"
-                                            },
-                                            " -u root --password='",
-                                            {
-                                                "Ref": "DBRootPassword"
-                                            },
-                                            "' >/dev/null 2>&1 </dev/null); (( $? != 0 ))"
-                                        ]
                                     ]
                                 }
                             }
@@ -842,8 +899,7 @@
                                 {
                                     "Ref": "AWS::StackName"
                                 },
-                                "         --resource WebServerInstance ",
-                                "         --configsets InstallAndRun ",
+                                "         --resource LaunchConfig ",
                                 "         --region ",
                                 {
                                     "Ref": "AWS::Region"
@@ -855,7 +911,7 @@
                                 {
                                     "Ref": "AWS::StackName"
                                 },
-                                "         --resource WebServerInstance ",
+                                "         --resource WebServerGroup ",
                                 "         --region ",
                                 {
                                     "Ref": "AWS::Region"
@@ -865,23 +921,28 @@
                         ]
                     }
                 }
-            },
-            "CreationPolicy": {
-                "ResourceSignal": {
-                    "Timeout": "PT5M"
-                }
             }
         },
         "WebServerSecurityGroup": {
             "Type": "AWS::EC2::SecurityGroup",
             "Properties": {
-                "GroupDescription": "Enable HTTP access via port 80",
+                "GroupDescription": "Enable HTTP access via port 80 locked down to the ELB and SSH access",
                 "SecurityGroupIngress": [
                     {
                         "IpProtocol": "tcp",
                         "FromPort": "80",
                         "ToPort": "80",
-                        "CidrIp": "0.0.0.0/0"
+                        "SourceSecurityGroupId": {
+                            "Fn::Select": [
+                                0,
+                                {
+                                    "Fn::GetAtt": [
+                                        "ApplicationLoadBalancer",
+                                        "SecurityGroups"
+                                    ]
+                                }
+                            ]
+                        }
                     },
                     {
                         "IpProtocol": "tcp",
@@ -890,6 +951,60 @@
                         "CidrIp": {
                             "Ref": "SSHLocation"
                         }
+                    }
+                ],
+                "VpcId": {
+                    "Ref": "VpcId"
+                }
+            }
+        },
+        "DBEC2SecurityGroup": {
+            "Type": "AWS::EC2::SecurityGroup",
+            "Properties": {
+                "GroupDescription": "Open database for access",
+                "SecurityGroupIngress": [
+                    {
+                        "IpProtocol": "tcp",
+                        "FromPort": "3306",
+                        "ToPort": "3306",
+                        "SourceSecurityGroupId": {
+                            "Ref": "WebServerSecurityGroup"
+                        }
+                    }
+                ],
+                "VpcId": {
+                    "Ref": "VpcId"
+                }
+            }
+        },
+        "MySQLDatabase": {
+            "Type": "AWS::RDS::DBInstance",
+            "Properties": {
+                "Engine": "MySQL",
+                "DBName": {
+                    "Ref": "DBName"
+                },
+                "MultiAZ": {
+                    "Ref": "MultiAZDatabase"
+                },
+                "MasterUsername": {
+                    "Ref": "DBUser"
+                },
+                "MasterUserPassword": {
+                    "Ref": "DBPassword"
+                },
+                "DBInstanceClass": {
+                    "Ref": "DBInstanceClass"
+                },
+                "AllocatedStorage": {
+                    "Ref": "DBAllocatedStorage"
+                },
+                "VPCSecurityGroups": [
+                    {
+                        "Fn::GetAtt": [
+                            "DBEC2SecurityGroup",
+                            "GroupId"
+                        ]
                     }
                 ]
             }
@@ -905,8 +1020,8 @@
                         "http://",
                         {
                             "Fn::GetAtt": [
-                                "WebServerInstance",
-                                "PublicDnsName"
+                                "ApplicationLoadBalancer",
+                                "DNSName"
                             ]
                         }
                     ]
